@@ -25,23 +25,30 @@ class Receiver(object):
 	def basicReceive(self, args):
 	  outputMessage = " [*] Waiting for messages from "
 
+	  #TODO little bit messy but source is either a string or a 1 element list of strings
+	  #the string is known to be 'defaultQueue' (it isn't user specified) 
+	  #and the list is known to force 1 element
+	  #this converts the 1 element list of strings to a string
+	  if(len(args.source) == 1):
+		args.source = args.source[0]
+
 	  if(args.receiveFromQueue):
-		self.channel.queue_declare(queue=args.source[0])
+		self.channel.queue_declare(queue=args.source)
 		self.channel.basic_consume(self.basicCallback,
-					   queue=args.source[0])
+					   queue=args.source)
 	 	outputMessage += "queue "
 	  else:
-   	  	self.channel.exchange_declare(exchange=args.source[0],
+   	  	self.channel.exchange_declare(exchange=args.source,
 	  	     	                      type='fanout')
 		result = self.channel.queue_declare(exclusive=True)
 		queue_name = result.method.queue
-		self.channel.queue_bind(exchange=args.source[0],
+		self.channel.queue_bind(exchange=args.source,
         		           queue=queue_name)
 		self.channel.basic_consume(self.basicCallback,
 				      queue=queue_name)
 		outputMessage += "exchange "
 
-	  outputMessage += args.source[0]
+	  outputMessage += args.source
 	  print outputMessage
 	  self.channel.start_consuming()
 
@@ -84,12 +91,12 @@ receiver = Receiver()
 
 parser = argparse.ArgumentParser(description='Receive messages from a given  AMQP queue or exchange')
 
-parser.add_argument('--source', dest='source', nargs=1, default='defaultQueue',  help='Specifies a source queue or exchange (default is queue change with --exchange)')
+parser.add_argument('--source', dest='source', nargs=1, default="defaultQueue",  help='Specifies a source queue or exchange (default is queue change with --exchange)')
 parser.add_argument('--exchange', dest='receiveFromQueue', action='store_const',
                    const= False, default= True,
                    help='An exchange will be used. Any receivers/consumers will see all messages from this exchange. A temporary rabbitMQ named queue will be created specifically for this instance of receiver and will be destroyed on exit')
 parser.add_argument('--rpcMode', choices=['call', 'create'], dest='rpcMode',
-		    help='Sets up this receiver to handle remote procedure calls. call specifies that the receiver should just call the functions where as create allows creation of new functions from senders')
+		    help='Sets up this receiver to handle remote procedure calls (create not yet implemented)')
 
 args = parser.parse_args()
 

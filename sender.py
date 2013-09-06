@@ -51,7 +51,6 @@ class Sender(object):
 	#send a rpc request
 	def rpcRequest(self, args):
 	  print "Sending rpc request"
-	  print args
 	  self.response = None
 	  self.correlationID = str(uuid.uuid4())
 	  self.channel.queue_declare(queue=self.consts.rpcQueueName)
