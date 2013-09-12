@@ -1,9 +1,10 @@
-#!/user/bin/env python
+#!/usr/bin/env python
+import re
 import argparse
 import sys
 import pika
 import imp
-from os import path
+import os
 from collections import namedtuple
 
 class Receiver(object):
@@ -16,21 +17,23 @@ class Receiver(object):
           #note these aren't true constants
           #any code like 'self.const.rpcQueueName = ' won't work
           #however it is possible to just re assign self.consts unfortunatly
-          Constants = namedtuple('String_Constants', ['rpcQueueName'])
-          self.consts = Constants('rpcQueue');
+	  #TODO queue names need to be in a shared config file
+          Constants = namedtuple('String_Constants', ['rpcQueueName', 'rpcCreateQueueName'])
+          self.consts = Constants('rpcQueue', 'rpcCreate');
+	  print self.consts
 
 	  #set up directory where RPC functions will be stored
-	  self.pathToRPCFunc = path.abspath('rpcServerFunctions/')
+	  self.pathToRPCFunc = os.path.abspath('rpcServerFunctions/')
 
+	#Function to setup basic receives either from a queue or exchange
+	#If from an exchange, a temporary queue is created for this receiver
 	def basicReceive(self, args):
 	  outputMessage = " [*] Waiting for messages from "
 
-	  #TODO little bit messy but source is either a string or a 1 element list of strings
-	  #the string is known to be 'defaultQueue' (it isn't user specified) 
-	  #and the list is known to force 1 element
-	  #this converts the 1 element list of strings to a string
-	  if(len(args.source) == 1):
-		args.source = args.source[0]
+	  #due to the way arg parser works, arguments are parsed as a list of strings (even if number of args is specified as 1)
+	  #we know that there will always only be one source queue or exchange we can read from at a time
+	  #this converts list of strings to just a string
+	  args.source = args.source[0]
 
 	  if(args.receiveFromQueue):
 		self.channel.queue_declare(queue=args.source)
@@ -50,29 +53,47 @@ class Receiver(object):
 
 	  outputMessage += args.source
 	  print outputMessage
-	  self.channel.start_consuming()
 
+	  try:
+  	  	self.channel.start_consuming()
+	  except KeyboardInterrupt:
+		print "\nExiting"
+		sys.exit()
+
+	#used with basic receive to print any messages sent
 	def basicCallback(self, ch, method, properties, body):
 	  print "[x] Received %r" % (body,)
 	  ch.basic_ack(delivery_tag = method.delivery_tag)
 
-
-	def rpcCallReceive(self, args):
+	#function to setup up RPC requests
+	def rpcRequestReceive(self, args):
 	  self.channel.queue_declare(queue=self.consts.rpcQueueName)
-	  self.channel.basic_consume(self.rpcCallback,
+	  self.channel.basic_consume(self.rpcRequestCallback,
 				     queue=self.consts.rpcQueueName)
-	  print "Begining rpc Receive"
-	  self.channel.start_consuming()
+	  print "Begining rpc request Receive"
 
-	def rpcCallback(self, ch, method, properties, body):
+	  try:
+  	  	self.channel.start_consuming()
+	  except KeyboardInterrupt:
+		print "\nExiting"
+		sys.exit()
+
+	#function to handle RPC requests
+	#dynamically loads modules from folder called /rpcServerFunctions
+	#(this means that functions can be modified or created while the receiver is running)
+	def rpcRequestCallback(self, ch, method, properties, body):
 	  print "Received rpc %r" %(body,)
+	  #sender sends function and arguments in comma seperated list with function,arg1,arg2.....
 	  commandToParse = body.split(",");
 	  function = commandToParse[0]
 	  args = commandToParse[1:]
 	  print "Attempting calling function %s with args %r" % (function, args,)
 	  try:
+		  #attempt to find the module
 		  fileHandle, pathName, impDescrip = imp.find_module(function, [self.pathToRPCFunc])
+		  #if it exsists load the module
 		  module = imp.load_module(function, fileHandle, pathName, impDescrip)
+		  #find the specified function and call it
 		  result = getattr(module, function)(args)
 		  print "Print function returned " + str(result)
 	  except Exception as e:
@@ -86,22 +107,68 @@ class Receiver(object):
 		                     body=str(result))
           self.channel.basic_ack(delivery_tag = method.delivery_tag)
 
+	#function to handle RPC create requests
+	#allows new functions to be made in /rpcServerFunctions
+	def rpcCreate(self, args):
+	  self.channel.queue_declare(queue=self.consts.rpcCreateQueueName)
+	  self.channel.basic_consume(self.rpcCreateCallback,
+				     queue=self.consts.rpcCreateQueueName)
+	  print "Begining rpc create Receive on queue:"
+	  print self.consts.rpcCreateQueueName
+	  try:
+  	  	self.channel.start_consuming()
+	  except KeyboardInterrupt:
+		print "\nExiting"
+		sys.exit()
+
+	def rpcCreateCallback(self, ch, method, properties, body):
+	  print "Got a new Function"
+	  print body
+	  #search file for first funtion decleration, that becomes the name of the file
+	  regex = re.compile("def\s(.*)\(") #look for string "def *(" only taking the * where the * is any number of chars
+	  functionNames = regex.search(body).group(1)
+	  print "Functions found in file:"
+	  print functionNames
+	  fileName = "./rpcServerFunctions/" + functionNames + ".py"
+	  print "File to be created:"
+	  fileName = os.path.abspath(fileName)
+	  print fileName
+	  try:
+		with open(fileName, "w") as f:
+			f.write(body)
+	  except Exception as e:
+	  		print "Error writing file:"
+	  		print e
+	  print "Succesfully opened file"
+          self.channel.basic_ack(delivery_tag = method.delivery_tag)
+	  print "Finished new function creation"
+
 #Main
 receiver = Receiver()
 
+#Top level parser
 parser = argparse.ArgumentParser(description='Receive messages from a given  AMQP queue or exchange')
+subparsers = parser.add_subparsers(dest='command')
 
-parser.add_argument('--source', dest='source', nargs=1, default="defaultQueue",  help='Specifies a source queue or exchange (default is queue change with --exchange)')
-parser.add_argument('--exchange', dest='receiveFromQueue', action='store_const',
+#Basic receive
+receive_parser = subparsers.add_parser('receive')
+receive_parser.add_argument('source', nargs=1,  help='Specifies a source queue or exchange (default is queue change with --exchange)')
+receive_parser.add_argument('--exchange', dest='receiveFromQueue', action='store_const',
                    const= False, default= True,
                    help='An exchange will be used. Any receivers/consumers will see all messages from this exchange. A temporary rabbitMQ named queue will be created specifically for this instance of receiver and will be destroyed on exit')
-parser.add_argument('--rpcMode', choices=['call', 'create'], dest='rpcMode',
-		    help='Sets up this receiver to handle remote procedure calls (create not yet implemented)')
+receive_parser.set_defaults(func=receiver.basicReceive)
+
+#handle RPC requests
+rpc_parser = subparsers.add_parser('rpc')
+rpc_parser.add_argument('rpcMode', choices=['request', 'create'],
+		    help='Sets up this receiver to handle remote procedure calls. The request mode specifies functions should just be called where create allows for new functions to be created. The list of availavle functions resides in ./rpcServerFunctions. These functions can be modified/new ones created while a receiver is running in request mode. Caveat: for creation, files with multiple functions will use the name of the first function in the file.')
+rpc_parser.set_defaults(func=receiver.rpcRequestReceive)
 
 args = parser.parse_args()
 
-if args.rpcMode is None:
-	receiver.basicReceive(args)
-elif args.rpcMode == 'call':
-	receiver.rpcCallReceive(args)
-
+if args.command == 'rpc':
+	if args.rpcMode == 'call':
+		args.func = receiver.rpcRequestReceive
+	elif args.rpcMode == 'create':
+		args.func = receiver.rpcCreate
+args.func(args)

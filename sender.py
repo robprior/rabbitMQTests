@@ -1,4 +1,4 @@
-#!/user/bin/env python
+#!/usr/bin/env python
 import argparse
 import sys
 import pika
@@ -22,8 +22,8 @@ class Sender(object):
 	  #note these aren't true constants
 	  #any code like 'self.const.rpcQueueName = ' won't work
 	  #however it is possible to just re assign self.consts unfortunatly
-	  Constants = namedtuple('String_Constants', ['rpcQueueName'])
-	  self.consts = Constants('rpcQueue');
+	  Constants = namedtuple('String_Constants', ['rpcQueueName', 'rpcCreateQueueName'])
+	  self.consts = Constants('rpcQueue', 'rpcCreate');
 
 	def processResponse(self, ch, method, props, body):
 	  #if the ID of the last message sent is the same response ID
@@ -72,10 +72,19 @@ class Sender(object):
 	  	self.connection.process_data_events()
 	  print "Server responded with " + self.response
 
-def rpcCreate(channel, args):
-	#this would be neat to do but maybe hard get normal RPC/routing going first
-	#maybe not practical unless could get decent file transfer going 
-	pass
+	def rpcCreate(self, args):
+	  try:
+		  with open (args.PathToFunction[0], "r") as funcFile:
+		    data = funcFile.read()
+	  except Exception as e:
+	  	print "Unable to open file to due exception:"
+		print e
+		sys.exit(1)
+	  self.channel.queue_declare(queue=self.consts.rpcCreateQueueName)
+	  self.channel.basic_publish(exchange='',
+	        		     routing_key=self.consts.rpcCreateQueueName,
+		                     body=str(data))
+	  print "Sent function to RPC server"
 
 #Main
 sender = Sender()
@@ -94,10 +103,15 @@ send_parser.add_argument('--exchange', dest='sendToQueue', action='store_const',
 send_parser.set_defaults(func=sender.send)
 
 #rpc call command
-rpcCall_parser = subparsers.add_parser('rpcRequest')
-rpcCall_parser.add_argument('FunctionToCall', nargs=1, help='The function to call from the rpc server')
-rpcCall_parser.add_argument('Arguments', nargs='*', help='list of arguments for function');
-rpcCall_parser.set_defaults(func=sender.rpcRequest)
+rpcRequest_parser = subparsers.add_parser('rpcRequest')
+rpcRequest_parser.add_argument('FunctionToCall', nargs=1, help='The function to call from the rpc server')
+rpcRequest_parser.add_argument('Arguments', nargs='*', help='List of arguments for function');
+rpcRequest_parser.set_defaults(func=sender.rpcRequest)
+
+#rpc create command
+rpcCreate_parser = subparsers.add_parser('rpcCreate')
+rpcCreate_parser.add_argument('PathToFunction', nargs=1, help='File to create new function on the rpc server. Caveat: a function called X must be in a file named X and the function is called with rpcRequest using the name X. This is why a function name is not required as a parameter. This function also must be the first function in the file.')
+rpcCreate_parser.set_defaults(func=sender.rpcCreate)
 
 #End parser creation
 
