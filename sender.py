@@ -3,28 +3,35 @@ import argparse
 import sys
 import pika
 import uuid
-from collections import namedtuple
+import os
+import ConfigParser
+
+config = ConfigParser.ConfigParser()
+config.read("./rabbitMQtests.config")
 
 #Class for handling producing
 class Sender(object):
 	def __init__(self):
 	  #setup the connection
-	  self.connection = pika.BlockingConnection(pika.ConnectionParameters(
-					               'localhost'))
+	  sslOptions = {}
+          sslOptions["ca_certs"]  = os.path.abspath(config.get('general', "CA_CERT_FILE"))
+          sslOptions["certfile"]  = os.path.abspath(config.get('general', 'CLIENT_CERT_FILE'))
+          sslOptions["keyfile"]   = os.path.abspath(config.get('general', 'CLIENT_KEY_FILE'))
+     
+          self.connection = pika.BlockingConnection(pika.ConnectionParameters(
+                                                     host=config.get('general', 'HOST'),
+                                                     port=int(config.get('general', 'PORT')),
+                                                     ssl=config.getboolean('general', 'USE_SSL'),
+                                                     ssl_options = sslOptions
+                                                     )
+                                                    )
           self.channel = self.connection.channel()
 
 	  #add a temporary, and exclusive call back queue for any response
 	  result = self.channel.queue_declare(exclusive = True)
 	  self.callbackQueue = result.method.queue
 	  self.channel.basic_consume(self.processResponse, queue=self.callbackQueue)
-
-	  #create any constants necessary for the class here
-	  #note these aren't true constants
-	  #any code like 'self.const.rpcQueueName = ' won't work
-	  #however it is possible to just re assign self.consts unfortunatly
-	  Constants = namedtuple('String_Constants', ['rpcQueueName', 'rpcCreateQueueName'])
-	  self.consts = Constants('rpcQueue', 'rpcCreate');
-
+	
 	def processResponse(self, ch, method, props, body):
 	  #if the ID of the last message sent is the same response ID
 	  if self.correlationID == props.correlation_id:
@@ -46,14 +53,14 @@ class Sender(object):
 		self.channel.basic_publish(exchange=args.destination[0],
 					   routing_key='',
 	               			   body=args.stringToSend[0])
-   	  print " [x] Sent " + args.stringToSend[0] + " to " + args.destination[0]
+   	  print "Sent " + args.stringToSend[0] + " to " + args.destination[0]
 
 	#send a rpc request
 	def rpcRequest(self, args):
 	  print "Sending rpc request"
 	  self.response = None
 	  self.correlationID = str(uuid.uuid4())
-	  self.channel.queue_declare(queue=self.consts.rpcQueueName)
+	  self.channel.queue_declare(queue=config.get('general', 'RPC_REQUEST_Q'))
 	
 	  stringToSend = args.FunctionToCall[0] + ','
 	  for arg in args.Arguments:
@@ -62,7 +69,7 @@ class Sender(object):
 	  stringToSend = stringToSend[:-1] 
 
 	  self.channel.basic_publish(exchange='',
-				     routing_key=self.consts.rpcQueueName,
+				     routing_key=config.get('general', 'RPC_REQUEST_Q'),
 				     properties=pika.BasicProperties(
 					reply_to = self.callbackQueue,
 					correlation_id = self.correlationID,
@@ -80,9 +87,9 @@ class Sender(object):
 	  	print "Unable to open file to due exception:"
 		print e
 		sys.exit(1)
-	  self.channel.queue_declare(queue=self.consts.rpcCreateQueueName)
+	  self.channel.queue_declare(queue=config.get('general', 'RPC_CREATE_Q'))
 	  self.channel.basic_publish(exchange='',
-	        		     routing_key=self.consts.rpcCreateQueueName,
+	        		     routing_key=config.get('general', 'RPC_CREATE_Q'),
 		                     body=str(data))
 	  print "Sent function to RPC server"
 

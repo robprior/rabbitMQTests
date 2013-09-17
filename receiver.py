@@ -5,30 +5,35 @@ import sys
 import pika
 import imp
 import os
-from collections import namedtuple
+import ConfigParser
+
+config = ConfigParser.ConfigParser()
+config.read("./rabbitMQtests.config")
 
 class Receiver(object):
 	def __init__(self):	  
-	  self.connection = pika.BlockingConnection(pika.ConnectionParameters(
-          				       'localhost'))
+	  #setup the connection
+          sslOptions = {}
+          sslOptions["ca_certs"]  = os.path.abspath(config.get('general', "CA_CERT_FILE"))
+          sslOptions["certfile"]  = os.path.abspath(config.get('general', 'CLIENT_CERT_FILE'))
+          sslOptions["keyfile"]   = os.path.abspath(config.get('general', 'CLIENT_KEY_FILE'))
+
+          self.connection = pika.BlockingConnection(pika.ConnectionParameters(
+                                                     host=config.get('general', 'HOST'),
+                                                     port=int(config.get('general', 'PORT')),
+                                                     ssl=config.getboolean('general', 'USE_SSL'),
+                                                     ssl_options = sslOptions
+                                                     )
+                                                    )
 	  self.channel = self.connection.channel()
 	
-	  #put any constants necessary for the class here
-          #note these aren't true constants
-          #any code like 'self.const.rpcQueueName = ' won't work
-          #however it is possible to just re assign self.consts unfortunatly
-	  #TODO queue names need to be in a shared config file
-          Constants = namedtuple('String_Constants', ['rpcQueueName', 'rpcCreateQueueName'])
-          self.consts = Constants('rpcQueue', 'rpcCreate');
-	  print self.consts
-
 	  #set up directory where RPC functions will be stored
-	  self.pathToRPCFunc = os.path.abspath('rpcServerFunctions/')
+	  self.pathToRPCFuncs = os.path.abspath(config.get('general', 'RECEIVE_RPC_FUNCS_DIR'))
 
 	#Function to setup basic receives either from a queue or exchange
 	#If from an exchange, a temporary queue is created for this receiver
 	def basicReceive(self, args):
-	  outputMessage = " [*] Waiting for messages from "
+	  outputMessage = "Waiting for messages from "
 
 	  #due to the way arg parser works, arguments are parsed as a list of strings (even if number of args is specified as 1)
 	  #we know that there will always only be one source queue or exchange we can read from at a time
@@ -62,14 +67,14 @@ class Receiver(object):
 
 	#used with basic receive to print any messages sent
 	def basicCallback(self, ch, method, properties, body):
-	  print "[x] Received %r" % (body,)
+	  print "Received %r" % (body,)
 	  ch.basic_ack(delivery_tag = method.delivery_tag)
 
 	#function to setup up RPC requests
 	def rpcRequestReceive(self, args):
-	  self.channel.queue_declare(queue=self.consts.rpcQueueName)
+	  self.channel.queue_declare(queue=config.get('general', 'RPC_REQUEST_Q'))
 	  self.channel.basic_consume(self.rpcRequestCallback,
-				     queue=self.consts.rpcQueueName)
+				     queue=config.get('general', 'RPC_REQUEST_Q'))
 	  print "Begining rpc request Receive"
 
 	  try:
@@ -79,7 +84,7 @@ class Receiver(object):
 		sys.exit()
 
 	#function to handle RPC requests
-	#dynamically loads modules from folder called /rpcServerFunctions
+	#dynamically loads modules from folder specified in config file
 	#(this means that functions can be modified or created while the receiver is running)
 	def rpcRequestCallback(self, ch, method, properties, body):
 	  print "Received rpc %r" %(body,)
@@ -90,7 +95,7 @@ class Receiver(object):
 	  print "Attempting calling function %s with args %r" % (function, args,)
 	  try:
 		  #attempt to find the module
-		  fileHandle, pathName, impDescrip = imp.find_module(function, [self.pathToRPCFunc])
+		  fileHandle, pathName, impDescrip = imp.find_module(function, [self.pathToRPCFuncs])
 		  #if it exsists load the module
 		  module = imp.load_module(function, fileHandle, pathName, impDescrip)
 		  #find the specified function and call it
@@ -110,9 +115,9 @@ class Receiver(object):
 	#function to handle RPC create requests
 	#allows new functions to be made in /rpcServerFunctions
 	def rpcCreate(self, args):
-	  self.channel.queue_declare(queue=self.consts.rpcCreateQueueName)
+	  self.channel.queue_declare(queue=config.get('general', 'RPC_CREATE_Q'))
 	  self.channel.basic_consume(self.rpcCreateCallback,
-				     queue=self.consts.rpcCreateQueueName)
+				     queue=config.get('general', 'RPC_CREATE_Q'))
 	  print "Begining rpc create Receive on queue:"
 	  print self.consts.rpcCreateQueueName
 	  try:
@@ -126,10 +131,8 @@ class Receiver(object):
 	  print body
 	  #search file for first funtion decleration, that becomes the name of the file
 	  regex = re.compile("def\s(.*)\(") #look for string "def *(" only taking the * where the * is any number of chars
-	  functionNames = regex.search(body).group(1)
-	  print "Functions found in file:"
-	  print functionNames
-	  fileName = "./rpcServerFunctions/" + functionNames + ".py"
+	  functionName = regex.search(body).group(1)
+	  fileName = self.pathToRPCFuncs  + functionName + ".py"
 	  print "File to be created:"
 	  fileName = os.path.abspath(fileName)
 	  print fileName
