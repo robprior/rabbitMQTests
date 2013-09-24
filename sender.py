@@ -33,6 +33,7 @@ class Sender(object):
           except Exception as e:
                 print "Could not connect to AMQP server, exiting with error:"
                 print e
+		sys.exit(1)
 
 	  #add a temporary, and exclusive call back queue for any response
 	  result = self.channel.queue_declare(exclusive = True)

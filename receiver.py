@@ -32,6 +32,7 @@ class Receiver(object):
 	  except Exception as e:
 		print "Could not connect to AMQP server, exiting with error:"
 		print e
+		sys.exit(1)
 	
 	  #set up directory where RPC functions will be stored
 	  self.pathToRPCFuncs = os.path.abspath(config.get('general', 'RECEIVE_RPC_FUNCS_DIR'))
