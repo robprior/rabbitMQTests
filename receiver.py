@@ -6,7 +6,9 @@ import pika
 import imp
 import os
 import ConfigParser
+import logging
 
+logging.basicConfig()
 config = ConfigParser.ConfigParser()
 config.read("./rabbitMQtests.config")
 
@@ -18,14 +20,18 @@ class Receiver(object):
           sslOptions["certfile"]  = os.path.abspath(config.get('general', 'CLIENT_CERT_FILE'))
           sslOptions["keyfile"]   = os.path.abspath(config.get('general', 'CLIENT_KEY_FILE'))
 
-          self.connection = pika.BlockingConnection(pika.ConnectionParameters(
-                                                     host=config.get('general', 'HOST'),
-                                                     port=int(config.get('general', 'PORT')),
-                                                     ssl=config.getboolean('general', 'USE_SSL'),
-                                                     ssl_options = sslOptions
-                                                     )
-                                                    )
-	  self.channel = self.connection.channel()
+	  try:
+          	self.connection = pika.BlockingConnection(pika.ConnectionParameters(
+                                                           host=config.get('general', 'HOST'),
+                                                           port=config.getint('general', 'PORT'),
+                                                           ssl=config.getboolean('general', 'USE_SSL'),
+                                                           ssl_options = sslOptions
+                                                          )
+                                                         )
+	  	self.channel = self.connection.channel()
+	  except Exception as e:
+		print "Could not connect to AMQP server, exiting with error:"
+		print e
 	
 	  #set up directory where RPC functions will be stored
 	  self.pathToRPCFuncs = os.path.abspath(config.get('general', 'RECEIVE_RPC_FUNCS_DIR'))
@@ -146,8 +152,27 @@ class Receiver(object):
           self.channel.basic_ack(delivery_tag = method.delivery_tag)
 	  print "Finished new function creation"
 
+	def basicTiming(self, args):
+	  print "Waiting for messages will send empty message back to sender"
+	  self.channel.queue_declare(queue=config.get('general', 'TIMING_Q'))
+	  self.channel.basic_consume(self.basicTimingCallback,
+				     queue=config.get('general', 'TIMING_Q'))
+	  try:
+  	  	self.channel.start_consuming()
+	  except KeyboardInterrupt:
+		print "\nExiting"
+		sys.exit()
+
+	def basicTimingCallback(self, ch, method, properties, body):	
+	  self.channel.basic_publish(exchange='',
+        	             	     routing_key=properties.reply_to,
+	        	             properties=pika.BasicProperties(correlation_id = \
+                		                                     properties.correlation_id),
+		                     body='.')
+          self.channel.basic_ack(delivery_tag = method.delivery_tag)
+	  
+
 #Main
-receiver = Receiver()
 
 #Top level parser
 parser = argparse.ArgumentParser(description='Receive messages from a given  AMQP queue or exchange')
@@ -159,19 +184,24 @@ receive_parser.add_argument('source', nargs=1,  help='Specifies a source queue o
 receive_parser.add_argument('--exchange', dest='receiveFromQueue', action='store_const',
                    const= False, default= True,
                    help='An exchange will be used. Any receivers/consumers will see all messages from this exchange. A temporary rabbitMQ named queue will be created specifically for this instance of receiver and will be destroyed on exit')
-receive_parser.set_defaults(func=receiver.basicReceive)
+receive_parser.set_defaults(func=Receiver.basicReceive)
 
 #handle RPC requests
 rpc_parser = subparsers.add_parser('rpc')
 rpc_parser.add_argument('rpcMode', choices=['request', 'create'],
 		    help='Sets up this receiver to handle remote procedure calls. The request mode specifies functions should just be called where create allows for new functions to be created. The list of availavle functions resides in ./rpcServerFunctions. These functions can be modified/new ones created while a receiver is running in request mode. Caveat: for creation, files with multiple functions will use the name of the first function in the file.')
-rpc_parser.set_defaults(func=receiver.rpcRequestReceive)
+rpc_parser.set_defaults(func=Receiver.rpcRequestReceive)
+
+#basic timing command
+timing_parser = subparsers.add_parser('time')
+timing_parser.set_defaults(func=Receiver.basicTiming)
 
 args = parser.parse_args()
 
 if args.command == 'rpc':
-	if args.rpcMode == 'call':
-		args.func = receiver.rpcRequestReceive
+	if args.rpcMode == 'request':
+		args.func = Receiver.rpcRequestReceive
 	elif args.rpcMode == 'create':
-		args.func = receiver.rpcCreate
-args.func(args)
+		args.func = Receiver.rpcCreate
+receiver = Receiver()
+args.func(receiver, args)

@@ -5,7 +5,10 @@ import pika
 import uuid
 import os
 import ConfigParser
+import logging
+import time
 
+logging.basicConfig()
 config = ConfigParser.ConfigParser()
 config.read("./rabbitMQtests.config")
 
@@ -18,14 +21,18 @@ class Sender(object):
           sslOptions["certfile"]  = os.path.abspath(config.get('general', 'CLIENT_CERT_FILE'))
           sslOptions["keyfile"]   = os.path.abspath(config.get('general', 'CLIENT_KEY_FILE'))
      
-          self.connection = pika.BlockingConnection(pika.ConnectionParameters(
-                                                     host=config.get('general', 'HOST'),
-                                                     port=int(config.get('general', 'PORT')),
-                                                     ssl=config.getboolean('general', 'USE_SSL'),
-                                                     ssl_options = sslOptions
-                                                     )
-                                                    )
-          self.channel = self.connection.channel()
+          try:
+                self.connection = pika.BlockingConnection(pika.ConnectionParameters(
+                                                           host=config.get('general', 'HOST'),
+                                                           port=config.getint('general', 'PORT'),
+                                                           ssl=config.getboolean('general', 'USE_SSL'),
+                                                           ssl_options = sslOptions
+                                                          )
+                                                         )
+                self.channel = self.connection.channel()
+          except Exception as e:
+                print "Could not connect to AMQP server, exiting with error:"
+                print e
 
 	  #add a temporary, and exclusive call back queue for any response
 	  result = self.channel.queue_declare(exclusive = True)
@@ -35,7 +42,6 @@ class Sender(object):
 	def processResponse(self, ch, method, props, body):
 	  #if the ID of the last message sent is the same response ID
 	  if self.correlationID == props.correlation_id:
-	    print "Got a response from the RPC server"
 	    self.response = body
 
 	#send a basic message
@@ -67,18 +73,16 @@ class Sender(object):
 	  	stringToSend += arg + ','	  
 	  #cut of the last , string will be split by rpcServer 
 	  stringToSend = stringToSend[:-1] 
-
 	  self.channel.basic_publish(exchange='',
-				     routing_key=config.get('general', 'RPC_REQUEST_Q'),
+	      			     routing_key=config.get('general', 'RPC_REQUEST_Q'),
 				     properties=pika.BasicProperties(
 					reply_to = self.callbackQueue,
 					correlation_id = self.correlationID,
 				     ),
 				     body=stringToSend)
 	  while self.response is None:
-	  	self.connection.process_data_events()
-	  print "Server responded with " + self.response
-
+	   	self.connection.process_data_events()
+	    
 	def rpcCreate(self, args):
 	  try:
 		  with open (args.PathToFunction[0], "r") as funcFile:
@@ -92,13 +96,30 @@ class Sender(object):
 	        		     routing_key=config.get('general', 'RPC_CREATE_Q'),
 		                     body=str(data))
 	  print "Sent function to RPC server"
-
+	
+	def basicTiming(self, args):
+	  self.response = None
+	  self.correlationID = str(uuid.uuid4())
+	  self.channel.queue_declare(queue=config.get('general', 'TIMING_Q'))
+	
+	  loops = int(args.NumLoops[0])
+	  while loops > 0:
+		  self.channel.basic_publish(exchange='',
+	        			     routing_key=config.get('general', 'TIMING_Q'),
+					     properties=pika.BasicProperties(
+						reply_to = self.callbackQueue,
+						correlation_id = self.correlationID,
+					     ),
+					     body='.')
+		  while self.response is None:
+		   	self.connection.process_data_events()
+		  loops = loops - 1
+	    
 #Main
-sender = Sender()
 
 #create top level parser
 parser = argparse.ArgumentParser(description='Send a message to a given AMQP queue or exchange')
-subparsers = parser.add_subparsers()
+subparsers = parser.add_subparsers(dest='command')
 
 #basic send command
 send_parser = subparsers.add_parser('send')
@@ -107,21 +128,32 @@ send_parser.add_argument('destination', nargs=1,  help='Specifies a destination 
 send_parser.add_argument('--exchange', dest='sendToQueue', action='store_const',
                    const= False, default= True,
                    help='An exchange will be used and any consumers using the same exchange will get the messages')
-send_parser.set_defaults(func=sender.send)
+send_parser.set_defaults(func=Sender.send)
 
 #rpc call command
 rpcRequest_parser = subparsers.add_parser('rpcRequest')
 rpcRequest_parser.add_argument('FunctionToCall', nargs=1, help='The function to call from the rpc server')
 rpcRequest_parser.add_argument('Arguments', nargs='*', help='List of arguments for function');
-rpcRequest_parser.set_defaults(func=sender.rpcRequest)
+rpcRequest_parser.set_defaults(func=Sender.rpcRequest)
 
 #rpc create command
 rpcCreate_parser = subparsers.add_parser('rpcCreate')
 rpcCreate_parser.add_argument('PathToFunction', nargs=1, help='File to create new function on the rpc server. Caveat: a function called X must be in a file named X and the function is called with rpcRequest using the name X. This is why a function name is not required as a parameter. This function also must be the first function in the file.')
-rpcCreate_parser.set_defaults(func=sender.rpcCreate)
+rpcCreate_parser.set_defaults(func=Sender.rpcCreate)
+
+#basic timing command
+timing_parser = subparsers.add_parser('time')
+timing_parser.add_argument('NumLoops', nargs=1, help="Specify the number of empty messages to send to the receiver. Sender will wait for an acknowledgement vefore sending the next.")
+timing_parser.set_defaults(func=Sender.basicTiming)
 
 #End parser creation
 
 #parse the arguments and call the right function with the established connection
 args = parser.parse_args()
-args.func(args)
+timeFunction = args.command == 'time'
+if timeFunction: start = time.time()
+sender = Sender()
+args.func(sender, args)
+if timeFunction:
+  end = time.time()
+  print "Time = " + str(end - start)
